@@ -265,9 +265,17 @@ func (n *node[T]) mutableChild(i int) *node[T] {
 func (n *node[T]) split(i int) (T, *node[T]) {
 	item := n.items[i]
 	next := n.cow.newNode()
+	// n is full, so give next the same capacity; otherwise it would have to
+	// be reallocated and copied as soon as it grows past half full.
+	if cap(next.items) < cap(n.items) {
+		next.items = make(items[T], 0, cap(n.items))
+	}
 	next.items = append(next.items, n.items[i+1:]...)
 	n.items.truncate(i)
 	if len(n.children) > 0 {
+		if cap(next.children) < cap(n.children) {
+			next.children = make(items[*node[T]], 0, cap(n.children))
+		}
 		next.children = append(next.children, n.children[i+1:]...)
 		n.children.truncate(i + 1)
 	}
