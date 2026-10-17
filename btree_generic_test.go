@@ -777,3 +777,49 @@ func BenchmarkClearCloneG(b *testing.B) {
 		c.Clear(true)
 	}
 }
+
+func TestNewPanicsG(t *testing.T) {
+	mustPanic := func(name string, f func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s: expected panic", name)
+			}
+		}()
+		f()
+	}
+	mustPanic("degree 1", func() { NewOrderedG[int](1) })
+	mustPanic("degree 0", func() { NewOrderedG[int](0) })
+	mustPanic("degree -1", func() { NewOrderedG[int](-1) })
+	mustPanic("nil less", func() { NewG[int](2, nil) })
+}
+
+func TestNilFreeListG(t *testing.T) {
+	// A nil free list should behave like a tree with a private default one.
+	tr := NewWithFreeListG(2, Less[int](), nil)
+	for i := 0; i < 1000; i++ {
+		tr.ReplaceOrInsert(i)
+	}
+	for i := 0; i < 500; i++ {
+		if _, ok := tr.Delete(i); !ok {
+			t.Fatalf("Delete(%d) not found", i)
+		}
+	}
+	if tr.Len() != 500 {
+		t.Fatalf("Len = %d, want 500", tr.Len())
+	}
+	tr.Clear(true)
+	if tr.Len() != 0 {
+		t.Fatalf("Len after Clear = %d", tr.Len())
+	}
+	tr.ReplaceOrInsert(1)
+	if v, ok := tr.Get(1); !ok || v != 1 {
+		t.Fatalf("Get(1) = %v, %v", v, ok)
+	}
+	// The Item-based wrapper forwards a nil *FreeList as a nil *FreeListG.
+	tr2 := NewWithFreeList(2, nil)
+	tr2.ReplaceOrInsert(Int(1))
+	if !tr2.Has(Int(1)) {
+		t.Fatalf("NewWithFreeList(nil) tree lost its item")
+	}
+}

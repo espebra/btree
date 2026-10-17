@@ -155,9 +155,17 @@ func NewG[T any](degree int, less LessFunc[T]) *BTreeG[T] {
 }
 
 // NewWithFreeListG creates a new B-Tree that uses the given node free list.
+//
+// A nil free list is replaced with a new one of DefaultFreeListSize.
 func NewWithFreeListG[T any](degree int, less LessFunc[T], f *FreeListG[T]) *BTreeG[T] {
 	if degree <= 1 {
 		panic("bad degree")
+	}
+	if less == nil {
+		panic("nil less func")
+	}
+	if f == nil {
+		f = NewFreeListG[T](DefaultFreeListSize)
 	}
 	return &BTreeG[T]{
 		degree: degree,
