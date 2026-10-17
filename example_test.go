@@ -17,7 +17,7 @@ package btree_test
 import (
 	"fmt"
 
-	"github.com/google/btree"
+	"github.com/espebra/btree"
 )
 
 func ExampleNewOrderedG() {
