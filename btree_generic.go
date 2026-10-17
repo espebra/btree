@@ -688,8 +688,15 @@ type BTreeG[T any] struct {
 	cow    *copyOnWriteContext[T]
 }
 
-// LessFunc[T] determines how to order a type 'T'.  It should implement a strict
-// ordering, and should return true if within that ordering, 'a' < 'b'.
+// LessFunc[T] determines how to order a type 'T'.  It must implement a strict
+// weak ordering, and should return true if within that ordering, 'a' < 'b'.
+// If !less(a, b) && !less(b, a), a and b are treated as equal, and only one of
+// them can be held in the tree.
+//
+// The tree relies on the ordering being consistent: an inconsistent LessFunc
+// (one for which both less(a, b) and less(b, a) can be true, or whose result
+// changes while an item is in the tree) corrupts the tree, and can cause
+// unbounded recursion on Delete.
 type LessFunc[T any] func(a, b T) bool
 
 // copyOnWriteContext pointers determine node ownership... a tree with a write
@@ -731,10 +738,11 @@ func (t *BTreeG[T]) Clone() (t2 *BTreeG[T]) {
 	// Both contexts are allocated together, halving the allocations per Clone.
 	cows := new([2]copyOnWriteContext[T])
 	cows[0], cows[1] = *t.cow, *t.cow
-	out := *t
+	t2 = new(BTreeG[T])
+	*t2 = *t
 	t.cow = &cows[0]
-	out.cow = &cows[1]
-	return &out
+	t2.cow = &cows[1]
+	return t2
 }
 
 // maxItems returns the max number of items to allow per node.

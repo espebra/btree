@@ -823,3 +823,42 @@ func TestNilFreeListG(t *testing.T) {
 		t.Fatalf("NewWithFreeList(nil) tree lost its item")
 	}
 }
+
+// TestDeleteInCloneLeavesOriginalIntactG is a regression test for
+// github.com/google/btree/issues/60: deletions from a clone that merge nodes
+// (and so pull items and children out of nodes shared with the original)
+// must not alter the original tree.  Degree 2 maximises merges.
+func TestDeleteInCloneLeavesOriginalIntactG(t *testing.T) {
+	const n = 2000
+	orig := NewOrderedG[int](2)
+	for _, v := range rand.Perm(n) {
+		orig.ReplaceOrInsert(v)
+	}
+	want := intAll(orig)
+
+	clone := orig.Clone()
+	for _, v := range rand.Perm(n) {
+		if _, ok := clone.Delete(v); !ok {
+			t.Fatalf("clone.Delete(%d) not found", v)
+		}
+		if got := intAll(orig); !reflect.DeepEqual(got, want) {
+			t.Fatalf("after clone.Delete(%d), original changed:\n got %v\nwant %v", v, got, want)
+		}
+	}
+	if clone.Len() != 0 || orig.Len() != n {
+		t.Fatalf("Len: clone %d, orig %d", clone.Len(), orig.Len())
+	}
+	checkInvariants(t, orig)
+	checkInvariants(t, clone)
+
+	// And the other direction: deletions from the original must not alter
+	// a clone taken before them.
+	clone2 := orig.Clone()
+	for _, v := range rand.Perm(n) {
+		orig.Delete(v)
+	}
+	if got := intAll(clone2); !reflect.DeepEqual(got, want) {
+		t.Fatalf("after orig deletes, clone changed")
+	}
+	checkInvariants(t, clone2)
+}
