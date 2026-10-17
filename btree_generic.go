@@ -170,9 +170,7 @@ type items[T any] []T
 func (s *items[T]) insertAt(index int, item T) {
 	var zero T
 	*s = append(*s, zero)
-	if index < len(*s) {
-		copy((*s)[index+1:], (*s)[index:])
-	}
+	copy((*s)[index+1:], (*s)[index:])
 	(*s)[index] = item
 }
 
@@ -689,8 +687,6 @@ func (c *copyOnWriteContext[T]) freeNode(n *node[T]) freeType {
 // ReplaceOrInsert adds the given item to the tree.  If an item in the tree
 // already equals the given one, it is removed from the tree and returned,
 // and the second return value is true.  Otherwise, (zeroValue, false)
-//
-// nil cannot be added to the tree (will panic).
 func (t *BTreeG[T]) ReplaceOrInsert(item T) (_ T, _ bool) {
 	if t.root == nil {
 		t.root = t.cow.newNode()
