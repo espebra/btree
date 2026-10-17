@@ -511,72 +511,139 @@ func empty[T any]() optionalItem[T] {
 // will force the iterator to include the first item when it equals 'start',
 // thus creating a "greaterOrEqual" or "lessThanEqual" rather than just a
 // "greaterThan" or "lessThan" queries.
-func (n *node[T]) iterate(dir direction, start, stop optionalItem[T], includeStart bool, hit bool, iter ItemIteratorG[T]) (bool, bool) {
-	var ok, found bool
-	var index int
+//
+// It returns false if iteration should stop (the iterator returned false).
+//
+// Because a node's items are sorted, a single binary search per bound locates
+// the in-range items [lo, hi) and tells us which children lie entirely within
+// the range.  Only the children at the boundaries can straddle a bound, so
+// only they are passed the bound to check; all other children, and all items
+// in [lo, hi), are visited with no per-item comparisons at all.
+func (n *node[T]) iterate(dir direction, start, stop optionalItem[T], includeStart bool, iter ItemIteratorG[T]) bool {
+	less := n.cow.less
+	lo, hi := 0, len(n.items)
 	switch dir {
 	case ascend:
+		// Visit order: children[lo], items[lo], children[lo+1], ..., items[hi-1], children[hi].
+		visitFirstChild := true
 		if start.valid {
-			index, _ = n.items.find(start.item, n.cow.less)
+			idx, found := n.items.find(start.item, less)
+			lo = idx // items[lo:] are >= start
+			if found {
+				// items[idx] == start.  children[idx] holds items < start and
+				// children[idx+1] holds items > start, so no child needs to
+				// check the start bound.
+				if includeStart {
+					visitFirstChild = false
+				} else {
+					lo++
+				}
+				start = empty[T]()
+			}
 		}
-		for i := index; i < len(n.items); i++ {
-			if len(n.children) > 0 {
-				if hit, ok = n.children[i].iterate(dir, start, stop, includeStart, hit, iter); !ok {
-					return hit, false
+		if stop.valid {
+			hi, _ = n.items.find(stop.item, less) // items[:hi] are < stop
+		}
+		if hi < lo {
+			// items[lo-1] >= stop, so children[lo] is out of range too.
+			return true
+		}
+		if len(n.children) == 0 {
+			for i := lo; i < hi; i++ {
+				if !iter(n.items[i]) {
+					return false
 				}
 			}
-			if !includeStart && !hit && start.valid && !n.cow.less(start.item, n.items[i]) {
-				hit = true
-				continue
+			return true
+		}
+		if visitFirstChild {
+			// children[lo] may contain items below start, and, if it is also
+			// children[hi], items at or above stop.
+			cstop := empty[T]()
+			if lo == hi {
+				cstop = stop
 			}
-			hit = true
-			if stop.valid && !n.cow.less(n.items[i], stop.item) {
-				return hit, false
-			}
-			if !iter(n.items[i]) {
-				return hit, false
+			if !n.children[lo].iterate(dir, start, cstop, includeStart, iter) {
+				return false
 			}
 		}
-		if len(n.children) > 0 {
-			if hit, ok = n.children[len(n.children)-1].iterate(dir, start, stop, includeStart, hit, iter); !ok {
-				return hit, false
+		for i := lo; i < hi; i++ {
+			if !iter(n.items[i]) {
+				return false
+			}
+			// children[i+1] holds items > items[i] >= start.  Only children[hi]
+			// may contain items at or above stop.
+			cstop := empty[T]()
+			if i+1 == hi {
+				cstop = stop
+			}
+			if !n.children[i+1].iterate(dir, empty[T](), cstop, includeStart, iter) {
+				return false
 			}
 		}
 	case descend:
+		// Visit order: children[hi], items[hi-1], children[hi-1], ..., items[lo], children[lo].
+		visitFirstChild := true
 		if start.valid {
-			index, found = n.items.find(start.item, n.cow.less)
-			if !found {
-				index = index - 1
+			idx, found := n.items.find(start.item, less)
+			hi = idx // items[:hi] are < start
+			if found {
+				// items[idx] == start.  children[idx] holds items < start and
+				// children[idx+1] holds items > start, so no child needs to
+				// check the start bound.
+				if includeStart {
+					hi++
+					visitFirstChild = false
+				}
+				start = empty[T]()
 			}
-		} else {
-			index = len(n.items) - 1
 		}
-		for i := index; i >= 0; i-- {
-			if start.valid && !n.cow.less(n.items[i], start.item) {
-				if !includeStart || hit || n.cow.less(start.item, n.items[i]) {
-					continue
+		if stop.valid {
+			idx, found := n.items.find(stop.item, less)
+			lo = idx // items[lo:] are >= stop
+			if found {
+				lo++ // items[lo:] are > stop
+			}
+		}
+		if hi < lo {
+			// items[lo-1] is at or beyond start, so children[lo] is out of range too.
+			return true
+		}
+		if len(n.children) == 0 {
+			for i := hi - 1; i >= lo; i-- {
+				if !iter(n.items[i]) {
+					return false
 				}
 			}
-			if len(n.children) > 0 {
-				if hit, ok = n.children[i+1].iterate(dir, start, stop, includeStart, hit, iter); !ok {
-					return hit, false
-				}
+			return true
+		}
+		if visitFirstChild {
+			// children[hi] may contain items above start, and, if it is also
+			// children[lo], items at or below stop.
+			cstop := empty[T]()
+			if lo == hi {
+				cstop = stop
 			}
-			if stop.valid && !n.cow.less(stop.item, n.items[i]) {
-				return hit, false //	continue
+			if !n.children[hi].iterate(dir, start, cstop, includeStart, iter) {
+				return false
 			}
-			hit = true
+		}
+		for i := hi - 1; i >= lo; i-- {
 			if !iter(n.items[i]) {
-				return hit, false
+				return false
 			}
-		}
-		if len(n.children) > 0 {
-			if hit, ok = n.children[0].iterate(dir, start, stop, includeStart, hit, iter); !ok {
-				return hit, false
+			// children[i] holds items < items[i] <= start.  Only children[lo]
+			// may contain items at or below stop.
+			cstop := empty[T]()
+			if i == lo {
+				cstop = stop
+			}
+			if !n.children[i].iterate(dir, empty[T](), cstop, includeStart, iter) {
+				return false
 			}
 		}
 	}
-	return hit, true
+	return true
 }
 
 // print is used for testing/debugging purposes.
@@ -761,7 +828,7 @@ func (t *BTreeG[T]) AscendRange(greaterOrEqual, lessThan T, iterator ItemIterato
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(ascend, optional[T](greaterOrEqual), optional[T](lessThan), true, false, iterator)
+	t.root.iterate(ascend, optional[T](greaterOrEqual), optional[T](lessThan), true, iterator)
 }
 
 // AscendLessThan calls the iterator for every value in the tree within the range
@@ -770,7 +837,7 @@ func (t *BTreeG[T]) AscendLessThan(pivot T, iterator ItemIteratorG[T]) {
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(ascend, empty[T](), optional(pivot), false, false, iterator)
+	t.root.iterate(ascend, empty[T](), optional(pivot), false, iterator)
 }
 
 // AscendGreaterOrEqual calls the iterator for every value in the tree within
@@ -779,7 +846,7 @@ func (t *BTreeG[T]) AscendGreaterOrEqual(pivot T, iterator ItemIteratorG[T]) {
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(ascend, optional[T](pivot), empty[T](), true, false, iterator)
+	t.root.iterate(ascend, optional[T](pivot), empty[T](), true, iterator)
 }
 
 // Ascend calls the iterator for every value in the tree within the range
@@ -788,7 +855,7 @@ func (t *BTreeG[T]) Ascend(iterator ItemIteratorG[T]) {
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(ascend, empty[T](), empty[T](), false, false, iterator)
+	t.root.iterate(ascend, empty[T](), empty[T](), false, iterator)
 }
 
 // DescendRange calls the iterator for every value in the tree within the range
@@ -797,7 +864,7 @@ func (t *BTreeG[T]) DescendRange(lessOrEqual, greaterThan T, iterator ItemIterat
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(descend, optional[T](lessOrEqual), optional[T](greaterThan), true, false, iterator)
+	t.root.iterate(descend, optional[T](lessOrEqual), optional[T](greaterThan), true, iterator)
 }
 
 // DescendLessOrEqual calls the iterator for every value in the tree within the range
@@ -806,7 +873,7 @@ func (t *BTreeG[T]) DescendLessOrEqual(pivot T, iterator ItemIteratorG[T]) {
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(descend, optional[T](pivot), empty[T](), true, false, iterator)
+	t.root.iterate(descend, optional[T](pivot), empty[T](), true, iterator)
 }
 
 // DescendGreaterThan calls the iterator for every value in the tree within
@@ -815,7 +882,7 @@ func (t *BTreeG[T]) DescendGreaterThan(pivot T, iterator ItemIteratorG[T]) {
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(descend, empty[T](), optional[T](pivot), false, false, iterator)
+	t.root.iterate(descend, empty[T](), optional[T](pivot), false, iterator)
 }
 
 // Descend calls the iterator for every value in the tree within the range
@@ -824,7 +891,7 @@ func (t *BTreeG[T]) Descend(iterator ItemIteratorG[T]) {
 	if t.root == nil {
 		return
 	}
-	t.root.iterate(descend, empty[T](), empty[T](), false, false, iterator)
+	t.root.iterate(descend, empty[T](), empty[T](), false, iterator)
 }
 
 // Get looks for the key item in the tree, returning it.  It returns
