@@ -224,7 +224,10 @@ func runOps(t *testing.T, data []byte) {
 	if len(data) == 0 {
 		return
 	}
-	degree := 2 + int(data[0]%4)
+	// Small degrees give deep trees with constant splits and merges; large
+	// degrees give wide nodes where the binary searches matter.
+	degrees := [...]int{2, 3, 4, 5, 8, 16, 32, 64}
+	degree := degrees[int(data[0])%len(degrees)]
 	data = data[1:]
 	trees := []*BTreeG[kv]{NewWithFreeListG(degree, kvLess, NewFreeListG[kv](8))}
 	models := []model{nil}
@@ -305,6 +308,7 @@ func runOps(t *testing.T, data []byte) {
 			t.Fatalf("Len: got %d want %d", tr.Len(), len(*m))
 		}
 	}
+	checkFreelistDisjoint(t, trees)
 	for i, tr := range trees {
 		checkInvariants(t, tr)
 		if got := collect(tr.Ascend); !eqKV(got, models[i]) {
@@ -344,5 +348,35 @@ func TestRandomOps(t *testing.T) {
 		b := make([]byte, 64+r.Intn(8192))
 		r.Read(b)
 		runOps(t, b)
+	}
+}
+
+// checkFreelistDisjoint verifies that no node reachable from any of the trees
+// (which all share one free list) is also sitting in that free list, i.e.
+// that nothing has been freed while still in use, and that freed nodes have
+// been cleared so they do not pin items for the garbage collector.
+func checkFreelistDisjoint[T any](t *testing.T, trees []*BTreeG[T]) {
+	t.Helper()
+	live := map[*node[T]]bool{}
+	var walk func(n *node[T])
+	walk = func(n *node[T]) {
+		live[n] = true
+		for _, c := range n.children {
+			walk(c)
+		}
+	}
+	for _, tr := range trees {
+		if tr.root != nil {
+			walk(tr.root)
+		}
+	}
+	fl := trees[0].cow.freelist
+	for _, n := range fl.freelist {
+		if live[n] {
+			t.Fatalf("node in free list is still reachable from a tree")
+		}
+		if len(n.items) != 0 || len(n.children) != 0 || n.cow != nil {
+			t.Fatalf("node in free list was not cleared: %d items, %d children, cow=%v", len(n.items), len(n.children), n.cow)
+		}
 	}
 }

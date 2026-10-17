@@ -862,3 +862,138 @@ func TestDeleteInCloneLeavesOriginalIntactG(t *testing.T) {
 	}
 	checkInvariants(t, clone2)
 }
+
+func TestOrderedTypesG(t *testing.T) {
+	type myString string
+	checkOrder := func(name string, got, want interface{}) {
+		t.Helper()
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v want %v", name, got, want)
+		}
+	}
+	s := NewOrderedG[string](2)
+	for _, v := range []string{"pear", "apple", "fig", "", "banana"} {
+		s.ReplaceOrInsert(v)
+	}
+	var ss []string
+	s.Ascend(func(v string) bool { ss = append(ss, v); return true })
+	checkOrder("string", ss, []string{"", "apple", "banana", "fig", "pear"})
+
+	ms := NewOrderedG[myString](2)
+	ms.ReplaceOrInsert("b")
+	ms.ReplaceOrInsert("a")
+	if v, _ := ms.Min(); v != "a" {
+		t.Errorf("~string min: got %q", v)
+	}
+
+	f := NewOrderedG[float64](2)
+	for _, v := range []float64{2.5, -1, 0, 1e9, -1e9} {
+		f.ReplaceOrInsert(v)
+	}
+	var fs []float64
+	f.Descend(func(v float64) bool { fs = append(fs, v); return true })
+	checkOrder("float64", fs, []float64{1e9, 2.5, 0, -1, -1e9})
+
+	i8 := NewOrderedG[int8](2)
+	for _, v := range []int8{127, -128, 0, -1, 1} {
+		i8.ReplaceOrInsert(v)
+	}
+	if min, _ := i8.Min(); min != -128 {
+		t.Errorf("int8 min: got %d", min)
+	}
+	if max, _ := i8.Max(); max != 127 {
+		t.Errorf("int8 max: got %d", max)
+	}
+
+	u8 := NewOrderedG[uint8](2)
+	u8.ReplaceOrInsert(255)
+	u8.ReplaceOrInsert(0)
+	if max, _ := u8.Max(); max != 255 {
+		t.Errorf("uint8 max: got %d", max)
+	}
+}
+
+func TestFreeListRecyclingG(t *testing.T) {
+	fl := NewFreeListG[int](64)
+	tr := NewWithFreeListG(4, Less[int](), fl)
+	for i := 0; i < 1000; i++ {
+		tr.ReplaceOrInsert(i)
+	}
+	if len(fl.freelist) != 0 {
+		t.Fatalf("free list should be empty while the tree is full, has %d", len(fl.freelist))
+	}
+	tr.Clear(true)
+	if len(fl.freelist) == 0 {
+		t.Fatalf("Clear(true) returned no nodes to the free list")
+	}
+	if len(fl.freelist) > 64 {
+		t.Fatalf("free list exceeded its capacity: %d", len(fl.freelist))
+	}
+	for _, n := range fl.freelist {
+		if len(n.items) != 0 || len(n.children) != 0 || n.cow != nil {
+			t.Fatalf("recycled node not cleared")
+		}
+	}
+	// Nodes are reused on the next insertions.
+	before := len(fl.freelist)
+	for i := 0; i < 100; i++ {
+		tr.ReplaceOrInsert(i)
+	}
+	if len(fl.freelist) >= before {
+		t.Fatalf("free list not drawn from on insert: %d -> %d", before, len(fl.freelist))
+	}
+	// Clear(false) leaves the free list alone.
+	before = len(fl.freelist)
+	tr.Clear(false)
+	if len(fl.freelist) != before || tr.Len() != 0 {
+		t.Fatalf("Clear(false): free list %d -> %d, len %d", before, len(fl.freelist), tr.Len())
+	}
+	// Two trees may share one free list.
+	tr2 := NewWithFreeListG(4, Less[int](), fl)
+	for i := 0; i < 1000; i++ {
+		tr.ReplaceOrInsert(i)
+		tr2.ReplaceOrInsert(-i)
+	}
+	if tr.Len() != 1000 || tr2.Len() != 1000 {
+		t.Fatalf("shared free list: lens %d, %d", tr.Len(), tr2.Len())
+	}
+	if min, _ := tr2.Min(); min != -999 {
+		t.Fatalf("tr2 min = %d", min)
+	}
+}
+
+// TestItemWrapperAPI exercises the Item-based BTree surface that the other
+// wrapper tests do not reach: free lists, Clear, Has, and nil returns.
+func TestItemWrapperAPI(t *testing.T) {
+	fl := NewFreeList(16)
+	tr := NewWithFreeList(3, fl)
+	if tr.Min() != nil || tr.Max() != nil || tr.Get(Int(1)) != nil || tr.Delete(Int(1)) != nil || tr.DeleteMin() != nil || tr.DeleteMax() != nil {
+		t.Fatal("empty tree should return nil everywhere")
+	}
+	for i := 0; i < 100; i++ {
+		if got := tr.ReplaceOrInsert(Int(i)); got != nil {
+			t.Fatalf("first insert of %d returned %v", i, got)
+		}
+	}
+	if got := tr.ReplaceOrInsert(Int(5)); got != Int(5) {
+		t.Fatalf("replace returned %v", got)
+	}
+	if !tr.Has(Int(50)) || tr.Has(Int(500)) {
+		t.Fatal("Has")
+	}
+	if tr.Min() != Int(0) || tr.Max() != Int(99) || tr.Len() != 100 {
+		t.Fatal("Min/Max/Len")
+	}
+	c := tr.Clone()
+	if c.Delete(Int(50)) != Int(50) || !tr.Has(Int(50)) || c.Has(Int(50)) {
+		t.Fatal("clone delete leaked into original")
+	}
+	tr.Clear(true)
+	if tr.Len() != 0 || tr.Min() != nil || c.Len() != 99 {
+		t.Fatal("Clear")
+	}
+	c.Clear(false)
+	if c.Len() != 0 {
+		t.Fatal("Clear(false)")
+	}
+}
