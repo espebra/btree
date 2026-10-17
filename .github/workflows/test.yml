@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
 # Nothing in this workflow writes to the repository.
 permissions:
