@@ -328,13 +328,17 @@ func (n *node[T]) insert(item T, maxItems int) (_ T, _ bool) {
 
 // get finds the given key in the subtree and returns it.
 func (n *node[T]) get(key T) (_ T, _ bool) {
-	i, found := n.items.find(key, n.cow.less)
-	if found {
-		return n.items[i], true
-	} else if len(n.children) > 0 {
-		return n.children[i].get(key)
+	less := n.cow.less
+	for {
+		i, found := n.items.find(key, less)
+		if found {
+			return n.items[i], true
+		}
+		if len(n.children) == 0 {
+			return
+		}
+		n = n.children[i]
 	}
-	return
 }
 
 // min returns the first item in the subtree.
