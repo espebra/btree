@@ -762,3 +762,18 @@ func BenchmarkDeleteAndRestoreG(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkClearCloneG(b *testing.B) {
+	tr := NewOrderedG[int](*btreeDegree)
+	for _, v := range rand.Perm(benchmarkTreeSize) {
+		tr.ReplaceOrInsert(v)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Clear a clone that only owns a single root-to-leaf path.
+		c := tr.Clone()
+		c.ReplaceOrInsert(i % benchmarkTreeSize)
+		c.Clear(true)
+	}
+}

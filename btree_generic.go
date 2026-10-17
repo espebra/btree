@@ -862,9 +862,8 @@ func (t *BTreeG[T]) Len() int {
 //   O(1): when the freelist is already full, it breaks out immediately
 //   O(freelist size):  when the freelist is empty and the nodes are all owned
 //       by this tree, nodes are added to the freelist until full.
-//   O(tree size):  when all nodes are owned by another tree, all nodes are
-//       iterated over looking for nodes to add to the freelist, and due to
-//       ownership, none are.
+//   O(1): when the root is owned by another tree (e.g. an unmodified Clone),
+//       since then no node in the tree is owned by this one.
 func (t *BTreeG[T]) Clear(addNodesToFreelist bool) {
 	if t.root != nil && addNodesToFreelist {
 		t.root.reset(t.cow)
@@ -876,6 +875,11 @@ func (t *BTreeG[T]) Clear(addNodesToFreelist bool) {
 // freelist is full, since the only benefit of iterating is to fill that
 // freelist up.  Returns true if parent reset call should continue.
 func (n *node[T]) reset(c *copyOnWriteContext[T]) bool {
+	if n.cow != c {
+		// Nodes are only ever copied into c beneath a parent already owned by
+		// c, so nothing in this subtree can be owned by c either.
+		return true
+	}
 	for _, child := range n.children {
 		if !child.reset(c) {
 			return false
@@ -1075,9 +1079,8 @@ func (t *BTree) Len() int {
 //   O(1): when the freelist is already full, it breaks out immediately
 //   O(freelist size):  when the freelist is empty and the nodes are all owned
 //       by this tree, nodes are added to the freelist until full.
-//   O(tree size):  when all nodes are owned by another tree, all nodes are
-//       iterated over looking for nodes to add to the freelist, and due to
-//       ownership, none are.
+//   O(1): when the root is owned by another tree (e.g. an unmodified Clone),
+//       since then no node in the tree is owned by this one.
 func (t *BTree) Clear(addNodesToFreelist bool) {
 	(*BTreeG[Item])(t).Clear(addNodesToFreelist)
 }
