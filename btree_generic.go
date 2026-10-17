@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build go1.18
-// +build go1.18
-
-// In Go 1.18 and beyond, a BTreeG generic is created, and BTree is a specific
-// instantiation of that generic for the Item interface, with a backwards-
-// compatible API.  Before go1.18, generics are not supported,
-// and BTree is just an implementation based around the Item interface.
+// BTreeG is the generic B-Tree implementation, and BTree is a specific
+// instantiation of it for the Item interface, with the API this package had
+// before generics.
 
 // Package btree implements in-memory B-Trees of arbitrary degree.
 //
