@@ -19,6 +19,7 @@ import (
 	"math/rand"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -992,5 +993,34 @@ func TestItemWrapperAPI(t *testing.T) {
 	c.Clear(false)
 	if c.Len() != 0 {
 		t.Fatal("Clear(false)")
+	}
+}
+
+func TestPrintG(t *testing.T) {
+	tr := NewOrderedG[int](2)
+	for i := 0; i < 20; i++ {
+		tr.ReplaceOrInsert(i)
+	}
+	var buf strings.Builder
+	tr.root.print(&buf, 0)
+	out := buf.String()
+	if !strings.HasPrefix(out, "NODE:") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	// One line per node, and every item appears exactly once.
+	nodes := 0
+	var count func(n *node[int])
+	count = func(n *node[int]) {
+		nodes++
+		for _, c := range n.children {
+			count(c)
+		}
+	}
+	count(tr.root)
+	if got := strings.Count(out, "NODE:"); got != nodes {
+		t.Fatalf("printed %d nodes, tree has %d", got, nodes)
+	}
+	if !strings.Contains(out, "  NODE:") {
+		t.Fatalf("expected indented child nodes:\n%s", out)
 	}
 }

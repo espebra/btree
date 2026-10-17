@@ -22,14 +22,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
-	"time"
 )
-
-func init() {
-	seed := time.Now().Unix()
-	fmt.Println(seed)
-	rand.Seed(seed)
-}
 
 // perm returns a random permutation of n Int items in the range [0, n).
 func perm(n int) (out []Item) {
