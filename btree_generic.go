@@ -66,7 +66,6 @@ package btree
 import (
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 )
@@ -221,9 +220,18 @@ func (s *items[T]) truncate(index int) {
 // list.  'found' is true if the item already exists in the list at the given
 // index.
 func (s items[T]) find(item T, less func(T, T) bool) (index int, found bool) {
-	i := sort.Search(len(s), func(i int) bool {
-		return less(item, s[i])
-	})
+	// This is sort.Search specialised by hand: the comparison is a direct
+	// call to less rather than an indirect call through a closure, and
+	// find is the hottest function in the package.
+	i, j := 0, len(s)
+	for i < j {
+		h := int(uint(i+j) >> 1)
+		if less(item, s[h]) {
+			j = h
+		} else {
+			i = h + 1
+		}
+	}
 	if i > 0 && !less(s[i-1], item) {
 		return i - 1, true
 	}
