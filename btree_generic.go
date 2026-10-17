@@ -728,10 +728,12 @@ func (t *BTreeG[T]) Clone() (t2 *BTreeG[T]) {
 	//   the original, shared nodes (old b.cow)
 	//   the new b.cow nodes
 	//   the new out.cow nodes
-	cow1, cow2 := *t.cow, *t.cow
+	// Both contexts are allocated together, halving the allocations per Clone.
+	cows := new([2]copyOnWriteContext[T])
+	cows[0], cows[1] = *t.cow, *t.cow
 	out := *t
-	t.cow = &cow1
-	out.cow = &cow2
+	t.cow = &cows[0]
+	out.cow = &cows[1]
 	return &out
 }
 
