@@ -15,6 +15,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Use bash on every OS: the Windows runner otherwise defaults to PowerShell,
+# which splits arguments like -coverprofile=coverage.out at the dot.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   lint:
     name: Lint
