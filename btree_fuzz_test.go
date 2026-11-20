@@ -58,6 +58,35 @@ func (m *model) delete(k int) (kv, bool) {
 	return old, true
 }
 
+// bulkInsert inserts xs, which must be in strictly ascending key order, and
+// returns what ReplaceOrInsert should have returned for each.  It merges in
+// O(len(m)+len(xs)) rather than shifting the slice once per item.
+func (m *model) bulkInsert(xs []kv) (old []kv, replaced []bool) {
+	old, replaced = make([]kv, len(xs)), make([]bool, len(xs))
+	out := make(model, 0, len(*m)+len(xs))
+	i := 0
+	for j, x := range xs {
+		for i < len(*m) && (*m)[i].key < x.key {
+			out = append(out, (*m)[i])
+			i++
+		}
+		if i < len(*m) && (*m)[i].key == x.key {
+			old[j], replaced[j] = (*m)[i], true
+			i++
+		}
+		out = append(out, x)
+	}
+	*m = append(out, (*m)[i:]...)
+	return
+}
+
+// deleteRange deletes every key in [lo, hi].
+func (m *model) deleteRange(lo, hi int) {
+	i, _ := m.find(lo)
+	j, _ := m.find(hi + 1)
+	*m = append((*m)[:i], (*m)[j:]...)
+}
+
 func (m model) clone() model { return append(model(nil), m...) }
 
 // filter returns the items of m satisfying keep, in ascending order.
@@ -217,6 +246,11 @@ func checkQueries(t *testing.T, tr *BTreeG[kv], m model, a, b, limit int) {
 
 // runOps interprets data as a sequence of operations applied both to a set of
 // btrees (sharing structure through Clone) and to reference models.
+//
+// The first byte selects the tree degree (data[0]%8) and the size of bulk
+// operations (data[0]/8%3), which insert or delete up to 255*bulkScale keys at
+// once.  Large bulk operations build trees several levels deep even at degree
+// 64, at a cost in speed.
 func runOps(t *testing.T, data []byte) {
 	if len(data) == 0 {
 		return
@@ -225,6 +259,8 @@ func runOps(t *testing.T, data []byte) {
 	// degrees give wide nodes where the binary searches matter.
 	degrees := [...]int{2, 3, 4, 5, 8, 16, 32, 64}
 	degree := degrees[int(data[0])%len(degrees)]
+	bulkScales := [...]int{0, 1, 8}
+	bulkScale := bulkScales[int(data[0])/len(degrees)%len(bulkScales)]
 	data = data[1:]
 	trees := []*BTreeG[kv]{NewWithFreeListG(degree, kvLess, NewFreeListG[kv](8))}
 	models := []model{nil}
@@ -237,21 +273,31 @@ func runOps(t *testing.T, data []byte) {
 		data = data[1:]
 		return int(b)
 	}
-	for len(data) > 0 {
+	// nextKey draws keys from two pools: half the time a dense range [0, 128),
+	// where inserts and deletes keep colliding, and otherwise a sparse range
+	// [128, 32896), which lets trees grow.
+	nextKey := func() int {
+		b := next()
+		if b < 128 {
+			return b
+		}
+		return 128 + (b-128)<<8 | next()
+	}
+	for steps := 0; len(data) > 0; steps++ {
 		op := next()
 		ti := next() % len(trees)
 		tr, m := trees[ti], &models[ti]
-		switch op % 12 {
+		switch op % 14 {
 		case 0, 1, 2, 3:
 			serial++
-			x := kv{key: next(), val: serial}
+			x := kv{key: nextKey(), val: serial}
 			got, gok := tr.ReplaceOrInsert(x)
 			want, wok := m.replaceOrInsert(x)
 			if got != want || gok != wok {
 				t.Fatalf("ReplaceOrInsert(%v): got %v,%v want %v,%v", x, got, gok, want, wok)
 			}
 		case 4, 5:
-			k := next()
+			k := nextKey()
 			got, gok := tr.Delete(kv{key: k})
 			want, wok := m.delete(k)
 			if got != want || gok != wok {
@@ -283,7 +329,7 @@ func runOps(t *testing.T, data []byte) {
 				models = append(models, m.clone())
 			}
 		case 9:
-			k := next()
+			k := nextKey()
 			got, gok := tr.Get(kv{key: k})
 			var want kv
 			i, wok := m.find(k)
@@ -294,12 +340,58 @@ func runOps(t *testing.T, data []byte) {
 				t.Fatalf("Get(%d): got %v,%v want %v,%v", k, got, gok, want, wok)
 			}
 		case 10:
-			checkQueries(t, tr, *m, next(), next(), next()%16)
+			checkQueries(t, tr, *m, nextKey(), nextKey(), next()%16)
 		case 11:
 			if next()%4 == 0 {
 				tr.Clear(next()%2 == 0)
 				*m = nil
 			}
+		case 12:
+			// Bulk insert a strided run of keys.  Single inserts alone cannot
+			// build a tree several levels deep at large degrees, which is where
+			// splits, steals and merges move children between internal nodes.
+			base, n, stride := nextKey(), next()*bulkScale, 1+next()%4
+			xs := make([]kv, n)
+			for i := range xs {
+				serial++
+				xs[i] = kv{key: base + i*stride, val: serial}
+			}
+			want, wok := m.bulkInsert(xs)
+			for i, x := range xs {
+				got, gok := tr.ReplaceOrInsert(x)
+				if got != want[i] || gok != wok[i] {
+					t.Fatalf("bulk ReplaceOrInsert(%v): got %v,%v want %v,%v", x, got, gok, want[i], wok[i])
+				}
+			}
+		case 13:
+			// Bulk delete a run of keys, in a fuzzer-chosen direction, to
+			// shrink a large tree by several levels.
+			base, n, reverse := nextKey(), next()*bulkScale, next()%2 == 0
+			lo, hi := base, base+n-1
+			if reverse {
+				lo, hi = base-n+1, base
+			}
+			for i := 0; i < n; i++ {
+				k := lo + i
+				if reverse {
+					k = hi - i
+				}
+				var want kv
+				j, wok := m.find(k)
+				if wok {
+					want = (*m)[j]
+				}
+				got, gok := tr.Delete(kv{key: k})
+				if got != want || gok != wok {
+					t.Fatalf("bulk Delete(%d): got %v,%v want %v,%v", k, got, gok, want, wok)
+				}
+			}
+			m.deleteRange(lo, hi)
+		}
+		// Check structure periodically, and after every bulk operation, so a
+		// broken invariant is reported close to the operation that broke it.
+		if steps%32 == 0 || op%14 >= 12 {
+			checkInvariants(t, tr)
 		}
 		if tr.Len() != len(*m) {
 			t.Fatalf("Len: got %d want %d", tr.Len(), len(*m))
@@ -328,6 +420,9 @@ func FuzzBTreeG(f *testing.F) {
 	for i := 0; i < 32; i++ {
 		b := make([]byte, 64+r.Intn(4096))
 		r.Read(b)
+		// Seeds use no or small bulk operations, to stay fast when run as
+		// part of plain `go test`; the fuzzer can mutate them into large ones.
+		b[0] %= 16
 		f.Add(b)
 	}
 	f.Fuzz(runOps)
@@ -344,7 +439,32 @@ func TestRandomOps(t *testing.T) {
 	for i := 0; i < n; i++ {
 		b := make([]byte, 64+r.Intn(8192))
 		r.Read(b)
+		b[0] %= 8 // no bulk operations; TestRandomOpsLarge covers those
 		runOps(t, b)
+	}
+}
+
+// TestRandomOpsLarge runs long inputs with large bulk operations at each
+// degree.  These build trees of thousands of items, deep enough (three or more
+// levels even at degree 64) that splits, steals and merges move children
+// between internal nodes, which small trees at large degrees never do.
+func TestRandomOpsLarge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large random trees in short mode")
+	}
+	r := rand.New(rand.NewSource(7))
+	for degreeIndex := 0; degreeIndex < 8; degreeIndex++ {
+		b := []byte{2*8 + byte(degreeIndex)} // bulk scale index 2: large
+		// Grow tree 0 to about 14000 items with eight bulk inserts of 2040
+		// keys at stride 3, with bases 4096 apart, so that the random
+		// operations that follow start from a deep tree and shrink it.
+		for j := 0; j < 8; j++ {
+			// op 12 (bulk insert), tree 0, sparse key 128+(16j)<<8, n 255*8, stride 1+2.
+			b = append(b, 12, 0, 128+16*byte(j), 0, 255, 2)
+		}
+		tail := make([]byte, 4096)
+		r.Read(tail)
+		runOps(t, append(b, tail...))
 	}
 }
 
