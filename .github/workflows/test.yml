@@ -53,6 +53,14 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      # tools/memcompare is a separate module, so that its GoLLRB dependency
+      # stays out of the library's go.mod; ./... above does not reach it.
+      - name: Build tools/memcompare
+        working-directory: tools/memcompare
+        run: |
+          go mod tidy && git diff --exit-code
+          go vet ./...
+          go build ./...
 
   test:
     name: Test (${{ matrix.os }})
@@ -95,3 +103,11 @@ jobs:
           cache: false
       - name: Fuzz
         run: go test -run '^$' -fuzz '^FuzzBTreeG$' -fuzztime 60s .
+      # A failing input is written to testdata/fuzz/FuzzBTreeG.  Keep it, so
+      # that it can be committed there as a regression test.
+      - name: Upload failing fuzz input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failure
+          path: testdata/fuzz
