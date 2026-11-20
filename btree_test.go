@@ -17,109 +17,52 @@ package btree
 import (
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"math/rand"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 )
 
 // perm returns a random permutation of n Int items in the range [0, n).
-func perm(n int) (out []Item) {
-	for _, v := range rand.Perm(n) {
+func perm(rnd *rand.Rand, n int) (out []Item) {
+	for _, v := range rnd.Perm(n) {
 		out = append(out, Int(v))
 	}
 	return
 }
 
-// rang returns an ordered list of Int items in the range [0, n).
-func rang(n int) (out []Item) {
-	for i := 0; i < n; i++ {
-		out = append(out, Int(i))
-	}
-	return
-}
-
-// all extracts all items from a tree in order as a slice.
-func all(t *BTree) (out []Item) {
-	t.Ascend(func(a Item) bool {
-		out = append(out, a)
-		return true
-	})
-	return
-}
-
-// rangerev returns a reversed ordered list of Int items in the range [0, n).
-func rangrev(n int) (out []Item) {
-	for i := n - 1; i >= 0; i-- {
-		out = append(out, Int(i))
-	}
-	return
-}
-
-// allrev extracts all items from a tree in reverse order as a slice.
-func allrev(t *BTree) (out []Item) {
-	t.Descend(func(a Item) bool {
-		out = append(out, a)
-		return true
-	})
-	return
-}
-
 var btreeDegree = flag.Int("degree", 32, "B-Tree degree")
 
-func TestBTree(t *testing.T) {
-	tr := New(*btreeDegree)
-	const treeSize = 10000
-	for i := 0; i < 10; i++ {
-		if min := tr.Min(); min != nil {
-			t.Fatalf("empty min, got %+v", min)
-		}
-		if max := tr.Max(); max != nil {
-			t.Fatalf("empty max, got %+v", max)
-		}
-		for _, item := range perm(treeSize) {
-			if x := tr.ReplaceOrInsert(item); x != nil {
-				t.Fatal("insert found item", item)
-			}
-		}
-		for _, item := range perm(treeSize) {
-			if !tr.Has(item) {
-				t.Fatal("has did not find item", item)
-			}
-		}
-		for _, item := range perm(treeSize) {
-			if x := tr.ReplaceOrInsert(item); x == nil {
-				t.Fatal("insert didn't find item", item)
-			}
-		}
-		if min, want := tr.Min(), Item(Int(0)); min != want {
-			t.Fatalf("min: want %+v, got %+v", want, min)
-		}
-		if max, want := tr.Max(), Item(Int(treeSize-1)); max != want {
-			t.Fatalf("max: want %+v, got %+v", want, max)
-		}
-		got := all(tr)
-		want := rang(treeSize)
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("mismatch:\n got: %v\nwant: %v", got, want)
-		}
+var testSeed = flag.Int64("seed", 0, "seed for the tests' random inputs; 0 picks a new one each run")
 
-		gotrev := allrev(tr)
-		wantrev := rangrev(treeSize)
-		if !reflect.DeepEqual(gotrev, wantrev) {
-			t.Fatalf("mismatch:\n got: %v\nwant: %v", got, want)
-		}
-
-		for _, item := range perm(treeSize) {
-			if x := tr.Delete(item); x == nil {
-				t.Fatalf("didn't find %v", item)
-			}
-		}
-		if got = all(tr); len(got) > 0 {
-			t.Fatalf("some left!: %v", got)
-		}
+// baseSeed is the seed for this run of the tests: -seed if given, otherwise
+// one chosen from the clock.
+var baseSeed = sync.OnceValue(func() int64 {
+	if *testSeed != 0 {
+		return *testSeed
 	}
+	return time.Now().UnixNano()
+})
+
+// newRand returns the source of random inputs for a test or benchmark.  Each
+// test gets its own stream, derived from the run's seed and the test's name,
+// so that what a test sees does not depend on which other tests ran or in what
+// order (-shuffle, -run).  If the test fails, the seed is logged, and running
+// it again with -seed reproduces its inputs exactly.
+func newRand(tb testing.TB) *rand.Rand {
+	tb.Helper()
+	seed := baseSeed()
+	tb.Cleanup(func() {
+		if tb.Failed() {
+			tb.Logf("random inputs were generated with -seed=%d", seed)
+		}
+	})
+	h := fnv.New64a()
+	h.Write([]byte(tb.Name()))
+	return rand.New(rand.NewSource(seed ^ int64(h.Sum64())))
 }
 
 func ExampleBTree() {
@@ -154,197 +97,129 @@ func ExampleBTree() {
 	// len:        8
 }
 
-func TestDeleteMin(t *testing.T) {
+// TestItemForwarding checks that each method of the Item-based BTree gives
+// the same result as the generic BTreeG it wraps.  The generic tree itself is
+// tested by the rest of the suite; this only has to show that the wrappers
+// forward arguments and results faithfully, including iterator early stops
+// and nil for the generic API's (zero, false).
+func TestItemForwarding(t *testing.T) {
+	rnd := newRand(t)
+	const n = 1000
 	tr := New(3)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
+	g := NewOrderedG[int](3)
+	toItems := func(vs []int) (out []Item) {
+		for _, v := range vs {
+			out = append(out, Int(v))
+		}
+		return
 	}
-	var got []Item
-	for v := tr.DeleteMin(); v != nil; v = tr.DeleteMin() {
-		got = append(got, v)
+	asItem := func(v int, ok bool) Item {
+		if !ok {
+			return nil
+		}
+		return Int(v)
 	}
-	if want := rang(100); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
+	same := func(what string, got, want interface{}) {
+		t.Helper()
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: BTree gave %v, BTreeG gave %v", what, got, want)
+		}
 	}
-}
+	for _, v := range rnd.Perm(n) {
+		v *= 2 // leave gaps, so that odd keys are absent
+		same("ReplaceOrInsert", tr.ReplaceOrInsert(Int(v)), asItem(g.ReplaceOrInsert(v)))
+	}
+	same("ReplaceOrInsert existing", tr.ReplaceOrInsert(Int(10)), asItem(g.ReplaceOrInsert(10)))
 
-func TestDeleteMax(t *testing.T) {
-	tr := New(3)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
+	// Every iteration method, over random bounds (present and absent keys),
+	// each with and without an early stop.
+	for i := 0; i < 200; i++ {
+		a, b, stop := rnd.Intn(2*n+4)-2, rnd.Intn(2*n+4)-2, rnd.Intn(2*n+4)-2
+		var gotStop, wantStop int
+		collectItems := func(f func(ItemIterator)) (out []Item) {
+			f(func(x Item) bool {
+				if int(x.(Int)) == stop {
+					gotStop++
+					return false
+				}
+				out = append(out, x)
+				return true
+			})
+			return
+		}
+		collectInts := func(f func(ItemIteratorG[int])) (out []Item) {
+			f(func(x int) bool {
+				if x == stop {
+					wantStop++
+					return false
+				}
+				out = append(out, Int(x))
+				return true
+			})
+			return
+		}
+		cases := []struct {
+			name string
+			item func(ItemIterator)
+			gen  func(ItemIteratorG[int])
+		}{
+			{"Ascend", tr.Ascend, g.Ascend},
+			{"Descend", tr.Descend, g.Descend},
+			{"AscendRange", func(f ItemIterator) { tr.AscendRange(Int(a), Int(b), f) }, func(f ItemIteratorG[int]) { g.AscendRange(a, b, f) }},
+			{"DescendRange", func(f ItemIterator) { tr.DescendRange(Int(a), Int(b), f) }, func(f ItemIteratorG[int]) { g.DescendRange(a, b, f) }},
+			{"AscendLessThan", func(f ItemIterator) { tr.AscendLessThan(Int(a), f) }, func(f ItemIteratorG[int]) { g.AscendLessThan(a, f) }},
+			{"AscendGreaterOrEqual", func(f ItemIterator) { tr.AscendGreaterOrEqual(Int(a), f) }, func(f ItemIteratorG[int]) { g.AscendGreaterOrEqual(a, f) }},
+			{"DescendLessOrEqual", func(f ItemIterator) { tr.DescendLessOrEqual(Int(a), f) }, func(f ItemIteratorG[int]) { g.DescendLessOrEqual(a, f) }},
+			{"DescendGreaterThan", func(f ItemIterator) { tr.DescendGreaterThan(Int(a), f) }, func(f ItemIteratorG[int]) { g.DescendGreaterThan(a, f) }},
+		}
+		for _, c := range cases {
+			gotStop, wantStop = 0, 0
+			same(fmt.Sprintf("%s(%d, %d) stopping at %d", c.name, a, b, stop), collectItems(c.item), collectInts(c.gen))
+			same(c.name+" early stop", gotStop, wantStop)
+		}
 	}
-	var got []Item
-	for v := tr.DeleteMax(); v != nil; v = tr.DeleteMax() {
-		got = append(got, v)
-	}
-	// Reverse our list.
-	for i := 0; i < len(got)/2; i++ {
-		got[i], got[len(got)-i-1] = got[len(got)-i-1], got[i]
-	}
-	if want := rang(100); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
-	}
-}
 
-func TestAscendRange(t *testing.T) {
-	tr := New(2)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
-	}
-	var got []Item
-	tr.AscendRange(Int(40), Int(60), func(a Item) bool {
-		got = append(got, a)
-		return true
-	})
-	if want := rang(100)[40:60]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
-	}
-	got = got[:0]
-	tr.AscendRange(Int(40), Int(60), func(a Item) bool {
-		if a.(Int) > 50 {
-			return false
+	// Lookups and deletions, of present and absent keys.
+	for i := 0; i < 2*n; i++ {
+		k := rnd.Intn(2*n+4) - 2
+		same("Get", tr.Get(Int(k)), asItem(g.Get(k)))
+		same("Has", tr.Has(Int(k)), g.Has(k))
+		same("Min", tr.Min(), asItem(g.Min()))
+		same("Max", tr.Max(), asItem(g.Max()))
+		switch rnd.Intn(4) {
+		case 0:
+			same("DeleteMin", tr.DeleteMin(), asItem(g.DeleteMin()))
+		case 1:
+			same("DeleteMax", tr.DeleteMax(), asItem(g.DeleteMax()))
+		default:
+			same("Delete", tr.Delete(Int(k)), asItem(g.Delete(k)))
 		}
-		got = append(got, a)
-		return true
-	})
-	if want := rang(100)[40:51]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
+		same("Len", tr.Len(), g.Len())
 	}
-}
 
-func TestDescendRange(t *testing.T) {
-	tr := New(2)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
-	}
-	var got []Item
-	tr.DescendRange(Int(60), Int(40), func(a Item) bool {
-		got = append(got, a)
-		return true
-	})
-	if want := rangrev(100)[39:59]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("descendrange:\n got: %v\nwant: %v", got, want)
-	}
-	got = got[:0]
-	tr.DescendRange(Int(60), Int(40), func(a Item) bool {
-		if a.(Int) < 50 {
-			return false
-		}
-		got = append(got, a)
-		return true
-	})
-	if want := rangrev(100)[39:50]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("descendrange:\n got: %v\nwant: %v", got, want)
-	}
-}
-func TestAscendLessThan(t *testing.T) {
-	tr := New(*btreeDegree)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
-	}
-	var got []Item
-	tr.AscendLessThan(Int(60), func(a Item) bool {
-		got = append(got, a)
-		return true
-	})
-	if want := rang(100)[:60]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
-	}
-	got = got[:0]
-	tr.AscendLessThan(Int(60), func(a Item) bool {
-		if a.(Int) > 50 {
-			return false
-		}
-		got = append(got, a)
-		return true
-	})
-	if want := rang(100)[:51]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
-	}
-}
+	// Clone gives an independent tree.
+	c, cg := tr.Clone(), g.Clone()
+	gmin, _ := g.Min()
+	same("Clone Delete", c.Delete(tr.Min()), asItem(cg.Delete(gmin)))
+	var all, allG []int
+	tr.Ascend(func(x Item) bool { all = append(all, int(x.(Int))); return true })
+	g.Ascend(func(x int) bool { allG = append(allG, x); return true })
+	same("original after Clone Delete", toItems(all), toItems(allG))
+	same("clone Len", c.Len(), cg.Len())
 
-func TestDescendLessOrEqual(t *testing.T) {
-	tr := New(*btreeDegree)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
-	}
-	var got []Item
-	tr.DescendLessOrEqual(Int(40), func(a Item) bool {
-		got = append(got, a)
-		return true
-	})
-	if want := rangrev(100)[59:]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("descendlessorequal:\n got: %v\nwant: %v", got, want)
-	}
-	got = got[:0]
-	tr.DescendLessOrEqual(Int(60), func(a Item) bool {
-		if a.(Int) < 50 {
-			return false
-		}
-		got = append(got, a)
-		return true
-	})
-	if want := rangrev(100)[39:50]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("descendlessorequal:\n got: %v\nwant: %v", got, want)
-	}
-}
-func TestAscendGreaterOrEqual(t *testing.T) {
-	tr := New(*btreeDegree)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
-	}
-	var got []Item
-	tr.AscendGreaterOrEqual(Int(40), func(a Item) bool {
-		got = append(got, a)
-		return true
-	})
-	if want := rang(100)[40:]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
-	}
-	got = got[:0]
-	tr.AscendGreaterOrEqual(Int(40), func(a Item) bool {
-		if a.(Int) > 50 {
-			return false
-		}
-		got = append(got, a)
-		return true
-	})
-	if want := rang(100)[40:51]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ascendrange:\n got: %v\nwant: %v", got, want)
-	}
-}
-
-func TestDescendGreaterThan(t *testing.T) {
-	tr := New(*btreeDegree)
-	for _, v := range perm(100) {
-		tr.ReplaceOrInsert(v)
-	}
-	var got []Item
-	tr.DescendGreaterThan(Int(40), func(a Item) bool {
-		got = append(got, a)
-		return true
-	})
-	if want := rangrev(100)[:59]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("descendgreaterthan:\n got: %v\nwant: %v", got, want)
-	}
-	got = got[:0]
-	tr.DescendGreaterThan(Int(40), func(a Item) bool {
-		if a.(Int) < 50 {
-			return false
-		}
-		got = append(got, a)
-		return true
-	})
-	if want := rangrev(100)[:50]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("descendgreaterthan:\n got: %v\nwant: %v", got, want)
-	}
+	// Clear empties the tree in both modes.
+	tr.Clear(true)
+	c.Clear(false)
+	same("Len after Clear", []int{tr.Len(), c.Len()}, []int{0, 0})
+	same("Min after Clear", tr.Min(), nil)
 }
 
 const benchmarkTreeSize = 10000
 
 func BenchmarkInsert(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
 	b.StartTimer()
 	i := 0
 	for i < b.N {
@@ -360,9 +235,10 @@ func BenchmarkInsert(b *testing.B) {
 }
 
 func BenchmarkSeek(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
 	size := 100000
-	insertP := perm(size)
+	insertP := perm(rnd, size)
 	tr := New(*btreeDegree)
 	for _, item := range insertP {
 		tr.ReplaceOrInsert(item)
@@ -375,8 +251,9 @@ func BenchmarkSeek(b *testing.B) {
 }
 
 func BenchmarkDeleteInsert(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, item := range insertP {
 		tr.ReplaceOrInsert(item)
@@ -389,8 +266,9 @@ func BenchmarkDeleteInsert(b *testing.B) {
 }
 
 func BenchmarkDeleteInsertCloneOnce(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, item := range insertP {
 		tr.ReplaceOrInsert(item)
@@ -404,8 +282,9 @@ func BenchmarkDeleteInsertCloneOnce(b *testing.B) {
 }
 
 func BenchmarkDeleteInsertCloneEachTime(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, item := range insertP {
 		tr.ReplaceOrInsert(item)
@@ -419,9 +298,10 @@ func BenchmarkDeleteInsertCloneEachTime(b *testing.B) {
 }
 
 func BenchmarkDelete(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
-	removeP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
+	removeP := perm(rnd, benchmarkTreeSize)
 	b.StartTimer()
 	i := 0
 	for i < b.N {
@@ -445,9 +325,10 @@ func BenchmarkDelete(b *testing.B) {
 }
 
 func BenchmarkGet(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
-	removeP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
+	removeP := perm(rnd, benchmarkTreeSize)
 	b.StartTimer()
 	i := 0
 	for i < b.N {
@@ -468,9 +349,10 @@ func BenchmarkGet(b *testing.B) {
 }
 
 func BenchmarkGetCloneEachTime(b *testing.B) {
+	rnd := newRand(b)
 	b.StopTimer()
-	insertP := perm(benchmarkTreeSize)
-	removeP := perm(benchmarkTreeSize)
+	insertP := perm(rnd, benchmarkTreeSize)
+	removeP := perm(rnd, benchmarkTreeSize)
 	b.StartTimer()
 	i := 0
 	for i < b.N {
@@ -506,7 +388,8 @@ func (a byInts) Swap(i, j int) {
 }
 
 func BenchmarkAscend(b *testing.B) {
-	arr := perm(benchmarkTreeSize)
+	rnd := newRand(b)
+	arr := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, v := range arr {
 		tr.ReplaceOrInsert(v)
@@ -526,7 +409,8 @@ func BenchmarkAscend(b *testing.B) {
 }
 
 func BenchmarkDescend(b *testing.B) {
-	arr := perm(benchmarkTreeSize)
+	rnd := newRand(b)
+	arr := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, v := range arr {
 		tr.ReplaceOrInsert(v)
@@ -545,7 +429,8 @@ func BenchmarkDescend(b *testing.B) {
 	}
 }
 func BenchmarkAscendRange(b *testing.B) {
-	arr := perm(benchmarkTreeSize)
+	rnd := newRand(b)
+	arr := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, v := range arr {
 		tr.ReplaceOrInsert(v)
@@ -568,7 +453,8 @@ func BenchmarkAscendRange(b *testing.B) {
 }
 
 func BenchmarkDescendRange(b *testing.B) {
-	arr := perm(benchmarkTreeSize)
+	rnd := newRand(b)
+	arr := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, v := range arr {
 		tr.ReplaceOrInsert(v)
@@ -590,7 +476,8 @@ func BenchmarkDescendRange(b *testing.B) {
 	}
 }
 func BenchmarkAscendGreaterOrEqual(b *testing.B) {
-	arr := perm(benchmarkTreeSize)
+	rnd := newRand(b)
+	arr := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, v := range arr {
 		tr.ReplaceOrInsert(v)
@@ -617,7 +504,8 @@ func BenchmarkAscendGreaterOrEqual(b *testing.B) {
 	}
 }
 func BenchmarkDescendLessOrEqual(b *testing.B) {
-	arr := perm(benchmarkTreeSize)
+	rnd := newRand(b)
+	arr := perm(rnd, benchmarkTreeSize)
 	tr := New(*btreeDegree)
 	for _, v := range arr {
 		tr.ReplaceOrInsert(v)
@@ -646,65 +534,9 @@ func BenchmarkDescendLessOrEqual(b *testing.B) {
 
 const cloneTestSize = 10000
 
-func cloneTest(t *testing.T, b *BTree, start int, p []Item, wg *sync.WaitGroup, trees *[]*BTree, lock *sync.Mutex) {
-	t.Logf("Starting new clone at %v", start)
-	lock.Lock()
-	*trees = append(*trees, b)
-	lock.Unlock()
-	for i := start; i < cloneTestSize; i++ {
-		b.ReplaceOrInsert(p[i])
-		if i%(cloneTestSize/5) == 0 {
-			wg.Add(1)
-			go cloneTest(t, b.Clone(), i+1, p, wg, trees, lock)
-		}
-	}
-	wg.Done()
-}
-
-func TestCloneConcurrentOperations(t *testing.T) {
-	b := New(*btreeDegree)
-	trees := []*BTree{}
-	p := perm(cloneTestSize)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go cloneTest(t, b, 0, p, &wg, &trees, &sync.Mutex{})
-	wg.Wait()
-	want := rang(cloneTestSize)
-	t.Logf("Starting equality checks on %d trees", len(trees))
-	for i, tree := range trees {
-		if !reflect.DeepEqual(want, all(tree)) {
-			t.Errorf("tree %v mismatch", i)
-		}
-	}
-	t.Log("Removing half from first half")
-	toRemove := rang(cloneTestSize)[cloneTestSize/2:]
-	for i := 0; i < len(trees)/2; i++ {
-		tree := trees[i]
-		wg.Add(1)
-		go func() {
-			for _, item := range toRemove {
-				tree.Delete(item)
-			}
-			wg.Done()
-		}()
-	}
-	wg.Wait()
-	t.Log("Checking all values again")
-	for i, tree := range trees {
-		var wantpart []Item
-		if i < len(trees)/2 {
-			wantpart = want[:cloneTestSize/2]
-		} else {
-			wantpart = want
-		}
-		if got := all(tree); !reflect.DeepEqual(wantpart, got) {
-			t.Errorf("tree %v mismatch, want %v got %v", i, len(want), len(got))
-		}
-	}
-}
-
 func BenchmarkDeleteAndRestore(b *testing.B) {
-	items := perm(16392)
+	rnd := newRand(b)
+	items := perm(rnd, 16392)
 	b.ResetTimer()
 	b.Run(`CopyBigFreeList`, func(b *testing.B) {
 		fl := NewFreeList(16392)
