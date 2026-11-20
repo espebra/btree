@@ -53,6 +53,14 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      # tools/memcompare is a separate module, so that its GoLLRB dependency
+      # stays out of the library's go.mod; ./... above does not reach it.
+      - name: Build tools/memcompare
+        working-directory: tools/memcompare
+        run: |
+          go mod tidy && git diff --exit-code
+          go vet ./...
+          go build ./...
 
   test:
     name: Test (${{ matrix.os }})
