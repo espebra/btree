@@ -17,7 +17,9 @@ package btree
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -256,4 +258,96 @@ func TestAllocsG(t *testing.T) {
 	}
 	checkInvariants(t, tr)
 	checkInvariants(t, small)
+}
+
+// TestConcurrentReadersG checks the documented guarantee that reads are safe
+// to run concurrently: several goroutines read one tree while others write to
+// clones of it, which share its nodes until copy-on-write separates them.  Run
+// under -race, any write to a shared node is reported; without it, readers
+// verify that the tree they see never changes.
+func TestConcurrentReadersG(t *testing.T) {
+	rnd := newRand(t)
+	const n = 10000
+	tr := NewOrderedG[int](4)
+	for _, v := range rnd.Perm(n) {
+		tr.ReplaceOrInsert(2 * v) // even keys only, so odd keys are absent
+	}
+	var wg sync.WaitGroup
+	// Writers: each mutates its own clone, sharing nodes with tr.
+	for w := 0; w < 2; w++ {
+		c := tr.Clone()
+		wr := rand.New(rand.NewSource(rnd.Int63()))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 5000; i++ {
+				k := wr.Intn(2 * n)
+				switch wr.Intn(4) {
+				case 0:
+					c.DeleteMin()
+				case 1:
+					c.DeleteMax()
+				case 2:
+					c.Delete(k)
+				default:
+					c.ReplaceOrInsert(k)
+				}
+			}
+			c.Clear(true)
+		}()
+	}
+	// Readers: all read tr, and check every answer.
+	for r := 0; r < 8; r++ {
+		rr := rand.New(rand.NewSource(rnd.Int63()))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 2000; i++ {
+				k := rr.Intn(2 * n)
+				v, ok := tr.Get(k)
+				if want := k%2 == 0; ok != want || (ok && v != k) || tr.Has(k) != want {
+					t.Errorf("Get(%d) = %d, %v", k, v, ok)
+					return
+				}
+				if lo, _ := tr.Min(); lo != 0 {
+					t.Errorf("Min = %d", lo)
+					return
+				}
+				if hi, _ := tr.Max(); hi != 2*(n-1) {
+					t.Errorf("Max = %d", hi)
+					return
+				}
+				if tr.Len() != n {
+					t.Errorf("Len = %d", tr.Len())
+					return
+				}
+				// A short range scan in a random direction.
+				next, count := k+k%2, 0
+				if i%2 == 0 {
+					tr.AscendGreaterOrEqual(k, func(x int) bool {
+						if x != next {
+							t.Errorf("AscendGreaterOrEqual(%d): got %d, want %d", k, x, next)
+							return false
+						}
+						next += 2
+						count++
+						return count < 20
+					})
+				} else {
+					next = k - k%2
+					tr.DescendLessOrEqual(k, func(x int) bool {
+						if x != next {
+							t.Errorf("DescendLessOrEqual(%d): got %d, want %d", k, x, next)
+							return false
+						}
+						next -= 2
+						count++
+						return count < 20
+					})
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	checkInvariants(t, tr)
 }
