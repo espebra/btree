@@ -5,6 +5,8 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  # Lets release.yml run the full suite on a tag before releasing it.
+  workflow_call:
 
 # Nothing in this workflow writes to the repository.
 permissions:
